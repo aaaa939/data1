@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>資安監控與氣象風險綜合儀表板 v3.7 (訪客鎖定版)</title>
+    <!-- 引入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#3b82f6',
+                        secondary: '#6366f1',
+                        darkBg: '#0f172a',
+                        cardBg: '#1e293b',
+                        gray: { 750: '#2d3748', 850: '#1a202c', 950: '#0d1117' }
+                    },
+                    animation: {
+                        'bounce-slow': 'bounce 3s infinite',
+                        'fade-in': 'fadeIn 0.5s ease-out',
+                    },
+                    keyframes: {
+                        fadeIn: {
+                            '0%': { opacity: '0', transform: 'translateY(10px)' },
+                            '100%': { opacity: '1', transform: 'translateY(0)' },
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- 引入外部庫 -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <style>
+        body { font-family: 'Noto Sans TC', sans-serif; overflow-x: hidden; }
+        * { transition: color 0.3s ease, background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease; }
+        #map { height: 450px; width: 100%; border-radius: 1rem; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); border: 1px solid rgba(255,255,255,0.1); }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+        .glass-morphism {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .weather-card {
+            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+            border: 1px solid rgba(59, 130, 246, 0.2);
+        }
+        .pulse-red { animation: pulse-red 2s infinite; }
+        @keyframes pulse-red {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+            70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+        .weather-icon-float { animation: floating 3s ease-in-out infinite; }
+        @keyframes floating {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-10px); }
+        }
+        .chart-wrapper { position: relative; height: 220px; width: 100%; }
+        .hidden-section { display: none !important; }
+        
+        /* 導覽按鈕激活狀態 */
+        .nav-btn.active { color: #3b82f6; border-bottom: 2px solid #3b82f6; }
+    </style>
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAnalytics } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-analytics.js";
+        import { 
+            getAuth, 
+            signInAnonymously, 
+            signInWithEmailAndPassword, 
+            createUserWithEmailAndPassword, 
+            signOut, 
+            onAuthStateChanged 
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- 初始化參數 ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'cyber-weather-app';
+        const firebaseConfig = {
+            apiKey: "AIzaSyCLQZLs031EHwgaaob0JVg05Kmwprd1_5g",
+            authDomain: "aaaa-f400a.firebaseapp.com",
+            databaseURL: "https://aaaa-f400a-default-rtdb.firebaseio.com",
+            projectId: "aaaa-f400a",
+            storageBucket: "aaaa-f400a.firebasestorage.app",
+            messagingSenderId: "1016829883023",
+            appId: "1:1016829883023:web:225c6286732aa6dd2d76fa",
+            measurementId: "G-K82HD0NEZD"
+        };
+        
+        let app, db, auth, mapInstance, userMarker, trendChartInstance;
+        let currentUser = null;
+        let isDark = true;
+        let isRegisterMode = false;
+        // 暫存圖片 Base64
+        let tempAvatarBase64 = null;
+        
+        const apiKey = "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";
+        const API_URL = "https://api.groq.com/openai/v1/chat/completions";
+        const OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast";
+
+        window.onload = async () => {
+            initFirebase();
+            setupEventListeners();
+        };
+
+        const initFirebase = async () => {
+            try {
+                app = initializeApp(firebaseConfig);
+                const analytics = getAnalytics(app);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                onAuthStateChanged(auth, (user) => {
+                    currentUser = user;
+                    if (user) {
+                        showApp();
+                    } else {
+                        if (currentUser && currentUser.uid.startsWith('guest-offline')) return;
+                        showAuthScreen();
+                    }
+                });
+            } catch (e) {
+                console.error("Firebase 初始化失敗", e);
+            }
+        };
+
+        const setupEventListeners = () => {
+            document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
+            document.getElementById('weather-search-btn').onclick = searchWeather;
+            
+            document.getElementById('auth-submit-btn').addEventListener('click', handleAuthSubmit);
+            document.getElementById('auth-toggle-btn').addEventListener('click', toggleAuthMode);
+            document.getElementById('guest-login-btn').addEventListener('click', handleGuestLogin);
+            document.getElementById('logout-btn').addEventListener('click', handleLogout);
+            document.getElementById('save-settings-btn').addEventListener('click', saveUserSettings);
+            
+            // 導覽按鈕切換
+            document.getElementById('nav-dashboard-btn').addEventListener('click', () => switchPage('dashboard'));
+            document.getElementById('nav-alert-btn').addEventListener('click', () => switchPage('alert'));
+            document.getElementById('nav-settings-btn').addEventListener('click', () => switchPage('settings'));
+
+            // 頭像上傳按鈕監聽
+            document.getElementById('avatar-upload-btn').addEventListener('click', () => {
+                document.getElementById('avatar-input').click();
+            });
+            document.getElementById('avatar-input').addEventListener('change', handleAvatarFileSelect);
+
+            // 災害預警測試按鈕監聽
+            document.getElementById('test-normal-btn').addEventListener('click', () => {
+                const city = document.getElementById('display-city').textContent;
+                updateAlertView(0, 0, 10, city + " (模擬)");
+            });
+            document.getElementById('test-rain-btn').addEventListener('click', () => {
+                const city = document.getElementById('display-city').textContent;
+                updateAlertView(100, 63, 10, city + " (模擬)");
+            });
+            document.getElementById('test-wind-btn').addEventListener('click', () => {
+                const city = document.getElementById('display-city').textContent;
+                updateAlertView(0, 0, 80, city + " (模擬)");
+            });
+            document.getElementById('test-danger-btn').addEventListener('click', () => {
+                const city = document.getElementById('display-city').textContent;
+                updateAlertView(100, 95, 80, city + " (模擬)");
+            });
+        };
+
+        // --- 視圖切換邏輯 (Auth vs App) ---
+        function showApp() {
+            document.getElementById('auth-view').classList.add('hidden-section');
+            document.getElementById('app-container').classList.remove('hidden-section');
+            document.getElementById('logout-btn').classList.remove('hidden-section');
+            document.getElementById('main-nav-buttons').classList.remove('hidden-section');
+            
+            updateUserUI();
+            
+            // 預設進入 Dashboard
+            switchPage('dashboard');
+
+            // 載入設定與初始化地圖
+            loadUserSettings().then(settings => {
+                const savedCity = settings?.defaultCity;
+                if (!mapInstance) {
+                    if (savedCity) {
+                        searchCityAndLoad(savedCity);
+                    } else {
+                        initMap(25.0330, 121.5654);
+                        updateWeather("台北市", 25.0330, 121.5654);
+                    }
+                }
+            });
+        }
+
+        function showAuthScreen() {
+            document.getElementById('auth-view').classList.remove('hidden-section');
+            document.getElementById('app-container').classList.add('hidden-section');
+            document.getElementById('logout-btn').classList.add('hidden-section');
+            document.getElementById('main-nav-buttons').classList.add('hidden-section');
+            document.getElementById('user-uid-display').textContent = "";
+            // 重置頭像
+            document.getElementById('header-avatar').src = "https://ui-avatars.com/api/?name=User&background=3b82f6&color=fff";
+        }
+
+        // --- 頁面切換邏輯 (Dashboard / Alert / Settings) ---
+        function switchPage(pageId) {
+            // [新增] 訪客鎖定邏輯
+            if (pageId === 'settings') {
+                const isGuest = currentUser && (currentUser.isAnonymous || currentUser.uid.startsWith('guest-offline'));
+                if (isGuest) {
+                    alert("🔒 訪客模式無法使用個人化設定功能，請註冊或登入會員。");
+                    return; // 阻止切換
+                }
+            }
+
+            document.getElementById('dashboard-view').classList.add('hidden-section');
+            document.getElementById('alert-view').classList.add('hidden-section');
+            document.getElementById('settings-view').classList.add('hidden-section');
+
+            document.getElementById('nav-dashboard-btn').classList.remove('active', 'text-blue-500', 'font-bold');
+            document.getElementById('nav-alert-btn').classList.remove('active', 'text-blue-500', 'font-bold');
+            document.getElementById('nav-settings-btn').classList.remove('active', 'text-blue-500', 'font-bold');
+
+            if (pageId === 'dashboard') {
+                document.getElementById('dashboard-view').classList.remove('hidden-section');
+                document.getElementById('nav-dashboard-btn').classList.add('active', 'text-blue-500', 'font-bold');
+                if(mapInstance) setTimeout(() => mapInstance.invalidateSize(), 100);
+            } else if (pageId === 'alert') {
+                document.getElementById('alert-view').classList.remove('hidden-section');
+                document.getElementById('nav-alert-btn').classList.add('active', 'text-blue-500', 'font-bold');
+            } else if (pageId === 'settings') {
+                document.getElementById('settings-view').classList.remove('hidden-section');
+                document.getElementById('nav-settings-btn').classList.add('active', 'text-blue-500', 'font-bold');
+            }
+        }
+
+        // --- 頭像處理邏輯 ---
+        function handleAvatarFileSelect(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            if (file.size > 1024 * 1024) {
+                alert("圖片太大，請選擇小於 1MB 的圖片");
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const img = new Image();
+                img.src = e.target.result;
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+                    const maxWidth = 200;
+                    const scaleSize = maxWidth / img.width;
+                    canvas.width = maxWidth;
+                    canvas.height = img.height * scaleSize;
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    
+                    tempAvatarBase64 = canvas.toDataURL('image/jpeg', 0.7);
+                    
+                    document.getElementById('settings-avatar-preview').src = tempAvatarBase64;
+                };
+            };
+            reader.readAsDataURL(file);
+        }
+
+        // --- 設定邏輯 (更新) ---
+        async function loadUserSettings() {
+            if (!currentUser || currentUser.uid.startsWith('guest-offline')) return null;
+            try {
+                const docRef = doc(db, 'artifacts', appId, 'users', currentUser.uid, 'settings', 'preferences');
+                const docSnap = await getDoc(docRef);
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    if (data.defaultCity) {
+                        document.getElementById('setting-default-city').value = data.defaultCity;
+                    }
+                    if (data.avatar) {
+                        document.getElementById('header-avatar').src = data.avatar;
+                        document.getElementById('settings-avatar-preview').src = data.avatar;
+                    }
+                    // [新增] 載入姓名和自我介紹
+                    if (data.username) {
+                        document.getElementById('setting-username').value = data.username;
+                        document.getElementById('user-uid-display').textContent = data.username; // 同步 Header
+                    }
+                    if (data.bio) {
+                        document.getElementById('setting-bio').value = data.bio;
+                    }
+                    return data;
+                }
+            } catch (e) { console.error(e); }
+            return null;
+        }
+
+        async function saveUserSettings() {
+            const city = document.getElementById('setting-default-city').value.trim();
+            const username = document.getElementById('setting-username').value.trim(); // [新增]
+            const bio = document.getElementById('setting-bio').value.trim(); // [新增]
+            
+            if (!currentUser) return;
+            const btn = document.getElementById('save-settings-btn');
+            const originalText = btn.textContent;
+            btn.textContent = "儲存中...";
+            
+            const settingsData = { defaultCity: city, username: username, bio: bio }; // [新增]
+            if (tempAvatarBase64) {
+                settingsData.avatar = tempAvatarBase64;
+            }
+
+            try {
+                if (!currentUser.uid.startsWith('guest-offline')) {
+                    const docRef = doc(db, 'artifacts', appId, 'users', currentUser.uid, 'settings', 'preferences');
+                    await setDoc(docRef, settingsData, { merge: true });
+                    
+                    if (tempAvatarBase64) {
+                        document.getElementById('header-avatar').src = tempAvatarBase64;
+                    }
+                    if (username) {
+                        document.getElementById('user-uid-display').textContent = username; // [新增] 更新 Header
+                    }
+                    
+                    alert("設定已儲存！");
+                } else {
+                    alert("訪客模式無法雲端儲存，但本次操作有效。");
+                    if (tempAvatarBase64) document.getElementById('header-avatar').src = tempAvatarBase64;
+                    if (username) document.getElementById('user-uid-display').textContent = username;
+                }
+                if (city) searchCityAndLoad(city);
+            } catch (e) { alert("儲存失敗"); console.error(e); } 
+            finally { btn.textContent = originalText; }
+        }
+
+        // --- Auth 相關 ---
+        function toggleAuthMode() {
+            isRegisterMode = !isRegisterMode;
+            document.getElementById('auth-title').textContent = isRegisterMode ? "註冊新帳號" : "系統登入";
+            document.getElementById('auth-submit-btn').textContent = isRegisterMode ? "註冊" : "登入";
+            document.getElementById('auth-toggle-btn').textContent = isRegisterMode ? "已有帳號？登入" : "建立新帳號";
+            document.getElementById('auth-error').textContent = "";
+        }
+
+        async function handleAuthSubmit() {
+            const email = document.getElementById('auth-email').value;
+            const password = document.getElementById('auth-password').value;
+            const errorMsg = document.getElementById('auth-error');
+            if (!email || !password) { errorMsg.textContent = "請輸入 Email 和密碼"; return; }
+            errorMsg.textContent = "處理中...";
+            try {
+                if (isRegisterMode) await createUserWithEmailAndPassword(auth, email, password);
+                else await signInWithEmailAndPassword(auth, email, password);
+            } catch (error) { errorMsg.textContent = "登入/註冊失敗: " + error.code; }
+        }
+
+        async function handleGuestLogin() {
+            try { await signInAnonymously(auth); } 
+            catch { currentUser = { uid: "guest-offline-" + Math.floor(Math.random()*1000), isAnonymous: true }; showApp(); }
+        }
+
+        async function handleLogout() {
+            try { await signOut(auth); } catch {}
+            currentUser = null;
+            showAuthScreen();
+        }
+
+        // --- 氣象與地圖 ---
+        async function updateWeather(cityName, lat, lon) {
+            const container = document.getElementById('weather-info-container');
+            if (!container) return;
+            container.classList.add('opacity-50');
+            try {
+                const params = new URLSearchParams({
+                    latitude: lat, longitude: lon,
+                    current: "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m",
+                    hourly: "temperature_2m,precipitation_probability,visibility",
+                    timezone: "auto", forecast_days: 2
+                });
+                const response = await fetch(`${OPEN_METEO_URL}?${params.toString()}`);
+                const weatherData = await response.json();
+                const current = weatherData.current;
+                const visibility = (weatherData.hourly?.visibility?.[0] || 10000) / 1000;
+
+                document.getElementById('display-city').textContent = cityName;
+                document.getElementById('display-temp').textContent = `${current.temperature_2m}°C`;
+                document.getElementById('display-humidity').textContent = `${current.relative_humidity_2m}%`;
+                document.getElementById('display-wind').textContent = `${current.wind_speed_10m} km/h`;
+                document.getElementById('display-apparent').textContent = `${current.apparent_temperature}°C`;
+                document.getElementById('display-rain').textContent = `${current.precipitation} mm`;
+                document.getElementById('display-visibility').textContent = `${visibility} km`;
+                document.getElementById('display-desc').textContent = getWeatherDesc(current.weather_code);
+                
+                // 更新警報頁面狀態
+                updateAlertView(current.precipitation, current.weather_code, current.wind_speed_10m, cityName);
+
+                renderTrendChart(weatherData.hourly);
+                generateRiskReport(cityName, { ...current, visibility, desc: getWeatherDesc(current.weather_code) });
+            } catch (err) { console.error(err); } 
+            finally { container.classList.remove('opacity-50'); }
+        }
+
+        function updateAlertView(precipitation, weatherCode, windSpeed, city) {
+            const isHeavyRain = precipitation > 2.0 || [63, 65, 81, 82, 95, 96, 99].includes(weatherCode);
+            const isStrongWind = windSpeed > 40;
+            
+            const alertStatusDiv = document.getElementById('alert-status-container');
+            if (isHeavyRain || isStrongWind) {
+                alertStatusDiv.innerHTML = `
+                    <div class="bg-red-500/10 border border-red-500 rounded-2xl p-8 text-center animate-fade-in">
+                        <div class="inline-flex items-center justify-center w-20 h-20 rounded-full bg-red-500 text-white text-4xl mb-4 pulse-red">
+                            <i class="fas fa-exclamation-triangle"></i>
+                        </div>
+                        <h3 class="text-2xl font-bold text-red-500 mb-2">災害預警發布中</h3>
+                        <p class="text-gray-400 mb-6">監測地點：${city}</p>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-left max-w-2xl mx-auto">
+                            ${isHeavyRain ? `<div class="bg-red-500/20 p-4 rounded-xl flex items-center"><i class="fas fa-cloud-showers-heavy text-red-400 text-xl mr-3"></i><div><p class="font-bold text-red-300">豪大雨警報</p><p class="text-xs text-red-200/70">降雨強度偏高，請注意淹水風險。</p></div></div>` : ''}
+                            ${isStrongWind ? `<div class="bg-orange-500/20 p-4 rounded-xl flex items-center"><i class="fas fa-wind text-orange-400 text-xl mr-3"></i><div><p class="font-bold text-orange-300">強風警報</p><p class="text-xs text-orange-200/70">風速過大，請加固戶外設施。</p></div></div>` : ''}
+                        </div>
+                    </div>
+                `;
+            } else {
+                alertStatusDiv.innerHTML = `
+                    <div class="bg-green-500/10 border border-green-500/30 rounded-2xl p-12 text-center animate-fade-in">
+                        <div class="inline-flex items-center justify-center w-20 h-20 rounded-full bg-green-500/20 text-green-500 text-4xl mb-6">
+                            <i class="fas fa-check-circle"></i>
+                        </div>
+                        <h3 class="text-2xl font-bold text-green-500 mb-2">目前無災害警報</h3>
+                        <p class="text-gray-400">監測地點：${city} - 各項數值均在安全範圍內。</p>
+                    </div>
+                `;
+            }
+        }
+
+        function renderTrendChart(hourlyData) {
+            const ctx = document.getElementById('trendChart').getContext('2d');
+            const now = new Date();
+            const currentHourStr = now.toISOString().slice(0, 13);
+            let startIndex = hourlyData.time.findIndex(t => t.startsWith(currentHourStr));
+            if (startIndex === -1) startIndex = 0;
+            const labels = [], temps = [], rainProbs = [];
+            for (let i = 0; i < 24; i++) {
+                const idx = startIndex + i;
+                if (idx < hourlyData.time.length) {
+                    const time = new Date(hourlyData.time[idx]);
+                    labels.push(`${time.getHours()}:00`);
+                    temps.push(hourlyData.temperature_2m[idx]);
+                    rainProbs.push(hourlyData.precipitation_probability[idx]);
+                }
+            }
+            if (trendChartInstance) trendChartInstance.destroy();
+            const gridColor = isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.05)';
+            const textColor = isDark ? '#9ca3af' : '#4b5563';
+            trendChartInstance = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        { label: '降雨機率 (%)', data: rainProbs, backgroundColor: 'rgba(59, 130, 246, 0.3)', yAxisID: 'y1', borderRadius: 4 },
+                        { label: '氣溫 (°C)', data: temps, type: 'line', borderColor: '#fbbf24', backgroundColor: 'rgba(251, 191, 36, 0.1)', yAxisID: 'y', fill: true, tension: 0.4 }
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    scales: {
+                        x: { grid: { display: false }, ticks: { color: textColor, maxTicksLimit: 8 } },
+                        y: { grid: { color: gridColor }, ticks: { color: textColor } },
+                        y1: { display: false, min: 0, max: 100 }
+                    },
+                    plugins: { legend: { labels: { color: textColor } } }
+                }
+            });
+        }
+
+        function getWeatherDesc(code) {
+            const codes = { 0: "晴朗", 1: "主要晴朗", 2: "多雲", 3: "陰天", 45: "霧", 48: "沉積霧", 51: "細雨", 61: "微雨", 71: "小雪", 80: "陣雨", 95: "雷雨" };
+            return codes[code] || "未知狀況";
+        }
+
+        // --- AI 生活建議報告 (優化版) ---
+        async function generateRiskReport(city, data) {
+            const reportEl = document.getElementById('risk-report-content');
+            if (!reportEl) return;
+            reportEl.innerHTML = '<div class="flex justify-center py-10"><i class="fas fa-spinner fa-spin text-2xl"></i></div>';
+            
+            // 優化的 AI Prompt (生活建議)
+            const prompt = `你是一位貼心的氣象生活助理。請針對以下實時氣象數據，為使用者生成一份生活建議報告。
+
+**氣象數據：**
+* 城市：${city}
+* 氣溫：${data.temp}°C (體感：${data.apparent}°C)
+* 濕度：${data.humidity}%
+* 降雨量：${data.rain} mm
+* 風速：${data.wind} km/h
+* 能見度：${data.visibility} km
+* 天氣狀況：${data.desc}
+
+**報告要求（請使用 Markdown 格式）：**
+
+1.  🌤️ **天氣綜述**：用一句話形容現在的體感舒適度。
+2.  👕 **穿搭建議**：建議穿著什麼類型的衣物（例如：透氣、保暖、攜帶雨具）。
+3.  🏃 **活動建議**：適合戶外運動還是室內活動？有無特定注意事項。
+4.  🏥 **健康叮嚀**：針對溫度、濕度或風速的健康提醒（例如：多喝水、注意防曬、小心路滑）。
+
+請保持語氣親切、實用。`;
+            
+            try {
+                const res = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+                    body: JSON.stringify({ 
+                        model: "llama-3.3-70b-versatile", 
+                        messages: [{ role: "user", content: prompt }],
+                        temperature: 0.7,
+                        max_tokens: 1024
+                    })
+                });
+                const result = await res.json();
+                const text = result.choices?.[0]?.message?.content;
+                if (text) {
+                    reportEl.innerHTML = marked.parse(text);
+                    // 根據天氣狀況更新風險標籤 (這裡指天氣影響程度)
+                    const riskLevel = (data.rain > 10 || data.wind > 40 || data.temp > 35) ? "不適宜戶外" : (data.rain > 2 || data.humidity > 85 ? "需注意" : "舒適");
+                    const levelEl = document.getElementById('risk-level-tag');
+                    if (levelEl) {
+                        levelEl.textContent = riskLevel;
+                        let colorClass = 'bg-green-500';
+                        if (riskLevel === '不適宜戶外') colorClass = 'bg-red-500 pulse-red';
+                        else if (riskLevel === '需注意') colorClass = 'bg-yellow-500';
+                        
+                        levelEl.className = `px-3 py-1 rounded-full text-xs font-bold ${colorClass} text-white`;
+                    }
+                }
+            } catch (e) { 
+                console.error(e); 
+                reportEl.innerHTML = "報告分析暫時無法使用，請檢查 API 連線。"; 
+            }
+        }
+
+        async function searchCityAndLoad(city) {
+             try {
+                const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(city)}&limit=1&accept-language=zh-TW`);
+                const data = await res.json();
+                if(data.length > 0) {
+                    const { lat, lon, display_name } = data[0];
+                    if(!mapInstance) initMap(parseFloat(lat), parseFloat(lon));
+                    updateWeather(display_name.split(',')[0], parseFloat(lat), parseFloat(lon));
+                    updateMapPosition(parseFloat(lat), parseFloat(lon), display_name);
+                }
+            } catch (e) { console.error(e); }
+        }
+
+        async function searchWeather() {
+            const city = document.getElementById('weather-search-input').value;
+            if(!city) return;
+            searchCityAndLoad(city);
+        }
+
+        function initMap(lat, lon) {
+            const mapEl = document.getElementById('map');
+            if (!mapEl) return;
+            if (mapInstance) mapInstance.remove();
+            mapInstance = L.map('map', { zoomControl: false }).setView([lat, lon], 12);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mapInstance);
+            userMarker = L.marker([lat, lon]).addTo(mapInstance).bindPopup("監控點").openPopup();
+        }
+
+        function updateMapPosition(lat, lon, label) {
+            if(userMarker) mapInstance.removeLayer(userMarker);
+            userMarker = L.marker([lat, lon]).addTo(mapInstance).bindPopup(label).openPopup();
+            mapInstance.flyTo([lat, lon], 13);
+        }
+
+        function toggleTheme() {
+            isDark = !isDark;
+            document.documentElement.classList.toggle('dark');
+            if (trendChartInstance) {
+                const textColor = isDark ? '#9ca3af' : '#4b5563';
+                trendChartInstance.options.scales.x.ticks.color = textColor;
+                trendChartInstance.options.scales.y.ticks.color = textColor;
+                trendChartInstance.update();
+            }
+        }
+
+        function updateUserUI() {
+            if(currentUser) {
+                const type = currentUser.isAnonymous ? "訪客" : "會員";
+                // 這裡會先顯示 UID，稍後 loadUserSettings 會更新為姓名
+                document.getElementById('user-uid-display').textContent = `${type}: ${currentUser.uid.substring(0,6)}...`;
+            }
+        }
+    </script>
+</head>
+<body class="bg-gray-50 dark:bg-darkBg text-gray-900 dark:text-gray-100 flex flex-col min-h-screen">
+
+    <header class="sticky top-0 z-50 glass-morphism border-b border-white/10 px-6 py-4">
+        <div class="container mx-auto flex justify-between items-center">
+            <div class="flex items-center space-x-3">
+                <div class="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-500/30">
+                    <i class="fas fa-shield-alt text-white"></i>
+                </div>
+                <div>
+                    <h1 class="text-xl font-bold">以風暴預測未來,以暗網守護天空<span class="text-blue-500 text-sm">PRO</span></h1>
+                    <p class="text-[10px] uppercase tracking-widest text-gray-500">REAL-TIME RISK MONITORING</p>
+                </div>
+            </div>
+            
+            <!-- 導覽按鈕區 -->
+            <div id="main-nav-buttons" class="hidden-section hidden md:flex items-center space-x-8 mx-4">
+                <button id="nav-dashboard-btn" class="nav-btn text-sm font-medium text-gray-400 hover:text-white transition-all pb-1 active">儀錶板</button>
+                <button id="nav-alert-btn" class="nav-btn text-sm font-medium text-gray-400 hover:text-red-400 transition-all pb-1">災害預警</button>
+                <button id="nav-settings-btn" class="nav-btn text-sm font-medium text-gray-400 hover:text-blue-400 transition-all pb-1">個人化設定</button>
+            </div>
+
+            <div class="flex items-center space-x-4">
+                <div id="user-uid-display" class="hidden md:block text-xs font-mono text-blue-400 bg-black/20 px-3 py-1 rounded-full"></div>
+                <!-- Header 使用者頭像 -->
+                <img id="header-avatar" src="https://ui-avatars.com/api/?name=User&background=3b82f6&color=fff" alt="User Avatar" class="w-8 h-8 rounded-full border-2 border-white/20 object-cover">
+                
+                <button id="theme-toggle" class="hover:text-blue-500 transition-colors w-8 h-8 flex items-center justify-center"><i class="fas fa-moon text-xl"></i></button>
+                <button id="logout-btn" class="hidden-section bg-red-500/20 hover:bg-red-500 text-red-400 hover:text-white px-3 py-1 rounded-lg text-xs font-bold transition-all border border-red-500/30">
+                    <i class="fas fa-sign-out-alt mr-1"></i> 登出
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <main class="flex-1 container mx-auto p-4 md:p-8 flex flex-col relative">
+        
+        <!-- 1. 登入/註冊視圖 -->
+        <div id="auth-view" class="flex-1 flex items-center justify-center min-h-[500px]">
+            <div class="w-full max-w-md bg-white dark:bg-cardBg p-8 rounded-2xl shadow-2xl border border-gray-200 dark:border-white/5 relative overflow-hidden">
+                <div class="absolute top-0 right-0 -mr-16 -mt-16 w-32 h-32 bg-blue-500 rounded-full blur-3xl opacity-20"></div>
+                <div class="absolute bottom-0 left-0 -ml-16 -mb-16 w-32 h-32 bg-purple-500 rounded-full blur-3xl opacity-20"></div>
+                
+                <div class="relative z-10 text-center">
+                    <div class="mb-6 inline-flex items-center justify-center w-16 h-16 rounded-full bg-blue-500/10 text-blue-500 text-2xl"><i class="fas fa-user-shield"></i></div>
+                    <h2 id="auth-title" class="text-2xl font-bold mb-2">系統登入</h2>
+                    <p class="text-gray-500 text-sm mb-8">存取即時資安與氣象風險數據</p>
+                    <div class="space-y-4 text-left">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-400 mb-1 ml-1">Email</label>
+                            <input type="email" id="auth-email" class="w-full bg-gray-50 dark:bg-black/20 border border-gray-200 dark:border-white/10 rounded-xl px-4 py-3 outline-none focus:border-blue-500 transition-all" placeholder="name@company.com">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-400 mb-1 ml-1">密碼</label>
+                            <input type="password" id="auth-password" class="w-full bg-gray-50 dark:bg-black/20 border border-gray-200 dark:border-white/10 rounded-xl px-4 py-3 outline-none focus:border-blue-500 transition-all" placeholder="••••••••">
+                        </div>
+                        <p id="auth-error" class="text-red-500 text-xs font-bold h-4"></p>
+                        <button id="auth-submit-btn" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-xl shadow-lg shadow-blue-600/30 transition-all">登入</button>
+                    </div>
+                    <div class="mt-6 flex flex-col space-y-3">
+                        <button id="auth-toggle-btn" class="text-sm text-gray-500 hover:text-blue-500 transition-colors">建立新帳號</button>
+                        <button id="guest-login-btn" class="text-xs font-bold text-gray-400 hover:text-gray-200 border border-gray-200 dark:border-white/10 rounded-lg py-2 hover:bg-white/5 transition-all">以訪客身份試用 <i class="fas fa-arrow-right ml-1"></i></button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- APP 主容器 -->
+        <div id="app-container" class="hidden-section flex-1 relative">
+            
+            <!-- 2. 儀錶板頁面 -->
+            <div id="dashboard-view" class="space-y-8 animate-fade-in">
+                <section class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+                    <div class="lg:col-span-1 weather-card rounded-2xl p-6 flex flex-col justify-between">
+                        <div>
+                            <h3 class="text-white font-bold mb-4 flex items-center"><i class="fas fa-search-location mr-2 text-blue-400"></i> 地點監測</h3>
+                            <div class="space-y-4">
+                                <input type="text" id="weather-search-input" placeholder="輸入城市 (如: 台北)" class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:ring-2 focus:ring-blue-500 outline-none">
+                                <button id="weather-search-btn" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-xl transition-all">更新分析</button>
+                            </div>
+                        </div>
+                        <div class="mt-8 flex justify-center opacity-30"><i class="fas fa-satellite-dish text-6xl text-white"></i></div>
+                    </div>
+
+                    <div id="weather-info-container" class="lg:col-span-3 bg-white dark:bg-cardBg rounded-2xl p-8 border border-gray-200 dark:border-white/5 shadow-xl">
+                        <div class="flex flex-wrap items-center justify-between mb-8">
+                            <div class="flex items-center space-x-6">
+                                <div class="weather-icon-float text-6xl text-blue-400"><i class="fas fa-cloud-sun-bolt"></i></div>
+                                <div>
+                                    <h2 id="display-city" class="text-4xl font-black mb-1">台北市</h2>
+                                    <p id="display-desc" class="text-gray-500 font-medium italic">偵測中...</p>
+                                </div>
+                            </div>
+                            <div class="text-right">
+                                <p class="text-xs text-gray-400 uppercase mb-1">即時氣溫</p>
+                                <span id="display-temp" class="text-5xl font-black text-blue-500 tracking-tighter">--°C</span>
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-2 md:grid-cols-5 gap-6 text-center mb-8">
+                            <div class="bg-gray-100 dark:bg-white/5 p-4 rounded-xl"><p class="text-[10px] text-gray-400 mb-1">體感</p><span id="display-apparent" class="font-bold">--°C</span></div>
+                            <div class="bg-gray-100 dark:bg-white/5 p-4 rounded-xl"><p class="text-[10px] text-gray-400 mb-1">濕度</p><span id="display-humidity" class="font-bold">--%</span></div>
+                            <div class="bg-gray-100 dark:bg-white/5 p-4 rounded-xl"><p class="text-[10px] text-gray-400 mb-1">降雨量</p><span id="display-rain" class="font-bold">-- mm</span></div>
+                            <div class="bg-gray-100 dark:bg-white/5 p-4 rounded-xl"><p class="text-[10px] text-gray-400 mb-1">風速</p><span id="display-wind" class="font-bold">-- km/h</span></div>
+                            <div class="bg-gray-100 dark:bg-white/5 p-4 rounded-xl"><p class="text-[10px] text-gray-400 mb-1">能見度</p><span id="display-visibility" class="font-bold">-- km</span></div>
+                        </div>
+                        <div class="border-t border-gray-200 dark:border-white/5 pt-6">
+                            <div class="flex justify-between items-end mb-4">
+                                <div><h3 class="font-bold text-gray-700 dark:text-gray-200"><i class="fas fa-chart-line mr-2 text-primary"></i>未來 24 小時趨勢</h3><p class="text-xs text-gray-500 dark:text-gray-400">Temperature & Precipitation Forecast</p></div>
+                            </div>
+                            <div class="chart-wrapper"><canvas id="trendChart"></canvas></div>
+                        </div>
+                    </div>
+                </section>
+
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    <div class="lg:col-span-1 bg-white dark:bg-cardBg p-6 rounded-2xl shadow-xl h-[550px] flex flex-col border border-white/5">
+                        <div class="flex justify-between items-center mb-6">
+                            <h3 class="text-lg font-bold flex items-center"><i class="fas fa-robot mr-2 text-blue-500"></i> AI 生活氣象助理</h3>
+                            <div id="risk-level-tag" class="px-3 py-1 rounded-full text-xs font-bold bg-gray-500 text-white">等待中</div>
+                        </div>
+                        <div id="risk-report-content" class="flex-1 overflow-y-auto prose dark:prose-invert prose-sm scrollbar-thin"><p class="text-gray-500 italic">正在運用 Groq AI 分析氣象並提供生活建議...</p></div>
+                    </div>
+                    <div class="lg:col-span-2 bg-white dark:bg-cardBg p-6 rounded-2xl shadow-xl h-[550px] flex flex-col border border-white/5">
+                        <div class="flex justify-between items-center mb-4"><h3 class="text-lg font-bold"><i class="fas fa-map-marked-alt mr-2 text-indigo-500"></i> 監控地理節點</h3></div>
+                        <div id="map" class="flex-1"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 3. 豪大雨/惡劣天氣警報頁面 -->
+            <div id="alert-view" class="hidden-section w-full h-full flex items-start justify-center pt-10 animate-fade-in">
+                <div class="w-full max-w-4xl">
+                    <div class="flex items-center justify-between mb-8">
+                        <h2 class="text-2xl font-bold text-gray-800 dark:text-white flex items-center"><i class="fas fa-broadcast-tower text-red-500 mr-3"></i> 災害預警中心</h2>
+                        <span class="text-sm text-gray-500">即時監控：溫度、風速、降雨量</span>
+                    </div>
+                    
+                    <div id="alert-status-container">
+                        <!-- 這裡會由 JS 動態插入內容 -->
+                        <div class="bg-gray-100 dark:bg-white/5 rounded-2xl p-12 text-center">
+                            <p class="text-gray-500">正在讀取氣象數據...</p>
+                        </div>
+                    </div>
+
+                    <!-- 測試控制區 -->
+                    <div class="mt-6 flex justify-center space-x-4">
+                        <button id="test-normal-btn" class="px-4 py-2 bg-green-500/10 text-green-500 hover:bg-green-500 hover:text-white rounded-lg transition-all text-xs font-bold border border-green-500/30">模擬正常</button>
+                        <button id="test-rain-btn" class="px-4 py-2 bg-blue-500/10 text-blue-500 hover:bg-blue-500 hover:text-white rounded-lg transition-all text-xs font-bold border border-blue-500/30">模擬豪雨</button>
+                        <button id="test-wind-btn" class="px-4 py-2 bg-orange-500/10 text-orange-500 hover:bg-orange-500 hover:text-white rounded-lg transition-all text-xs font-bold border border-orange-500/30">模擬強風</button>
+                        <button id="test-danger-btn" class="px-4 py-2 bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white rounded-lg transition-all text-xs font-bold border border-red-500/30">模擬複合災害</button>
+                    </div>
+
+                    <div class="mt-8 grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <div class="bg-white dark:bg-cardBg p-6 rounded-xl border border-gray-200 dark:border-white/5 shadow-lg">
+                            <h4 class="font-bold mb-2 text-gray-700 dark:text-gray-200">防範豪雨</h4>
+                            <p class="text-sm text-gray-500">檢查機房排水系統，確保低窪地區設備架高。</p>
+                        </div>
+                        <div class="bg-white dark:bg-cardBg p-6 rounded-xl border border-gray-200 dark:border-white/5 shadow-lg">
+                            <h4 class="font-bold mb-2 text-gray-700 dark:text-gray-200">防範強風</h4>
+                            <p class="text-sm text-gray-500">加固戶外天線與通訊塔，檢查備用電源。</p>
+                        </div>
+                        <div class="bg-white dark:bg-cardBg p-6 rounded-xl border border-gray-200 dark:border-white/5 shadow-lg">
+                            <h4 class="font-bold mb-2 text-gray-700 dark:text-gray-200">緊急聯絡</h4>
+                            <p class="text-sm text-gray-500">若發生災害，請立即通報資安應變中心 (SOC)。</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 4. 個人化設定頁面 -->
+            <div id="settings-view" class="hidden-section w-full h-full flex items-start justify-center pt-10 animate-fade-in">
+                <div class="w-full max-w-2xl bg-white dark:bg-cardBg rounded-2xl p-8 shadow-2xl border border-gray-200 dark:border-white/5">
+                    <div class="border-b border-gray-200 dark:border-white/10 pb-6 mb-6">
+                        <h2 class="text-2xl font-bold flex items-center"><i class="fas fa-sliders-h mr-3 text-blue-500"></i> 個人化介面設定</h2>
+                        <p class="text-gray-500 text-sm mt-1">調整您的儀表板預設值與顯示偏好</p>
+                    </div>
+                    
+                    <div class="space-y-8">
+                        <!-- 頭像設定區塊 -->
+                        <div class="flex items-center space-x-6">
+                            <div class="relative group">
+                                <img id="settings-avatar-preview" src="https://ui-avatars.com/api/?name=User&background=3b82f6&color=fff" class="w-24 h-24 rounded-full object-cover border-4 border-white/10 shadow-lg">
+                                <button id="avatar-upload-btn" class="absolute bottom-0 right-0 bg-blue-600 hover:bg-blue-500 text-white rounded-full p-2 shadow-lg transition-transform transform hover:scale-110">
+                                    <i class="fas fa-camera"></i>
+                                </button>
+                                <input type="file" id="avatar-input" class="hidden" accept="image/*">
+                            </div>
+                            <div>
+                                <h4 class="font-bold text-lg">更換頭像</h4>
+                                <p class="text-sm text-gray-500 mb-2">支援 JPG, PNG (最大 1MB)</p>
+                                <p class="text-xs text-blue-400">點擊相機圖示選擇圖片</p>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-gray-400 mb-2">預設監控城市</label>
+                            <div class="flex">
+                                <span class="inline-flex items-center px-3 rounded-l-xl border border-r-0 border-gray-300 dark:border-white/10 bg-gray-50 dark:bg-white/5 text-gray-500 text-sm">
+                                    <i class="fas fa-city"></i>
+                                </span>
+                                <input type="text" id="setting-default-city" class="flex-1 bg-white dark:bg-black/20 border border-gray-300 dark:border-white/10 rounded-r-xl px-4 py-3 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all" placeholder="例如: 台中市">
+                            </div>
+                            <p class="text-xs text-gray-500 mt-2"><i class="fas fa-info-circle mr-1"></i> 系統將在登入時自動載入此城市的天氣與 AI 風險分析。</p>
+                        </div>
+                        
+                        <!-- 個人資料區塊 -->
+                        <div class="pt-6 border-t border-gray-200 dark:border-white/10 space-y-4">
+                            <h4 class="font-bold text-gray-700 dark:text-gray-200 mb-2">個人資料</h4>
+                            
+                            <div>
+                                <label class="block text-sm font-medium text-gray-400 mb-1">用戶姓名</label>
+                                <input type="text" id="setting-username" class="w-full bg-gray-50 dark:bg-black/20 border border-gray-200 dark:border-white/10 rounded-xl px-4 py-2 outline-none focus:border-blue-500 transition-all" placeholder="您的暱稱">
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-medium text-gray-400 mb-1">自我介紹</label>
+                                <textarea id="setting-bio" rows="3" class="w-full bg-gray-50 dark:bg-black/20 border border-gray-200 dark:border-white/10 rounded-xl px-4 py-2 outline-none focus:border-blue-500 transition-all resize-none" placeholder="介紹一下自己..."></textarea>
+                            </div>
+                        </div>
+
+                        <div class="pt-4">
+                            <button id="save-settings-btn" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-blue-500/30 flex items-center justify-center">
+                                <i class="fas fa-save mr-2"></i> 儲存所有變更
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <footer class="p-8 text-center text-gray-500 text-xs border-t border-white/5 mt-12">
+        <p>&copy; 2024 CyberWeather Pro. Powered by Groq & Open-Meteo.</p>
+    </footer>
+
+</body>
+</html>
